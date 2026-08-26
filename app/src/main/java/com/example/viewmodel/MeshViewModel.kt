@@ -20,7 +20,7 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val coreModule = InformationProcessingModule()
     
     // Transport layer
-    private val transport: MeshTransportAdapter = NearbyConnectionsTransportAdapter()
+    private val transport: MeshTransportAdapter = NearbyConnectionsTransportAdapter(application)
     
     private val _activeRequests = MutableStateFlow<List<EmergencyRequest>>(emptyList())
     val activeRequests: StateFlow<List<EmergencyRequest>> = _activeRequests
