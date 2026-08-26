@@ -16,17 +16,29 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.example.core.AreaSummary
+import com.example.core.Category
+import com.example.core.EmergencyRequest
+import com.example.ui.screens.HistoryScreen
+import com.example.ui.screens.MapScreen
+import com.example.ui.screens.ProfileScreen
 import com.example.ui.theme.*
+import com.example.viewmodel.MeshViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,13 +46,48 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
+                val viewModel: MeshViewModel = viewModel()
+                val navController = rememberNavController()
+                var showAddDialog by remember { mutableStateOf(false) }
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
-                    bottomBar = { BottomNavBar() },
-                    floatingActionButton = { CustomFab() },
+                    bottomBar = { BottomNavBar(navController) },
+                    floatingActionButton = { 
+                        CustomFab { showAddDialog = true } 
+                    },
                     floatingActionButtonPosition = FabPosition.Center
                 ) { innerPadding ->
-                    MeshLinkScreen(modifier = Modifier.padding(innerPadding))
+                    NavHost(
+                        navController = navController,
+                        startDestination = "requests",
+                        modifier = Modifier.padding(innerPadding)
+                    ) {
+                        composable("requests") {
+                            RequestsScreen(viewModel)
+                        }
+                        composable("map") {
+                            val active = viewModel.activeRequests.collectAsState().value
+                            MapScreen(activeRequests = active)
+                        }
+                        composable("history") {
+                            val resolved = viewModel.resolvedRequests.collectAsState().value
+                            HistoryScreen(resolvedRequests = resolved)
+                        }
+                        composable("profile") {
+                            ProfileScreen(nodeId = viewModel.nodeId)
+                        }
+                    }
+
+                    if (showAddDialog) {
+                        AddRequestDialog(
+                            onDismiss = { showAddDialog = false },
+                            onSubmit = { type, lat, lon, severity ->
+                                viewModel.createNewRequest(type, lat, lon, severity)
+                                showAddDialog = false
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -48,27 +95,31 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MeshLinkScreen(modifier: Modifier = Modifier) {
+fun RequestsScreen(viewModel: MeshViewModel) {
+    val activeRequests by viewModel.activeRequests.collectAsState()
+    val areaSummaries by viewModel.areaSummaries.collectAsState()
+    val peers by viewModel.connectedPeers.collectAsState()
+
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .background(Background)
     ) {
-        Header()
+        Header(peers)
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            IntelligenceCard()
-            RequestsList()
+            IntelligenceCard(activeRequests, areaSummaries)
+            RequestsList(activeRequests, onResolve = { req -> viewModel.resolveRequest(req) })
         }
     }
 }
 
 @Composable
-fun Header() {
+fun Header(peers: Int) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -105,7 +156,7 @@ fun Header() {
                 ) {
                     Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(SuccessEmerald))
                     Text(
-                        text = "MESH ACTIVE • 12 PEERS",
+                        text = "MESH ACTIVE • $peers PEERS",
                         color = Color(0xFF059669),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
@@ -123,11 +174,21 @@ fun Header() {
             Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextTertiary)
         }
     }
-    Divider(color = Color(0xFFF1F5F9))
+    HorizontalDivider(color = Color(0xFFF1F5F9))
 }
 
 @Composable
-fun IntelligenceCard() {
+fun IntelligenceCard(activeRequests: List<EmergencyRequest>, summaries: Map<String, AreaSummary>) {
+    val totalSeverity = summaries.values.sumOf { it.totalSeverity }
+    // Pick the most severe cell to display
+    val mostSevereCell = summaries.maxByOrNull { it.value.totalSeverity }?.key ?: "N/A"
+    
+    val topCategory = summaries.values
+        .flatMap { it.requestCounts.entries }
+        .groupBy({ it.key }, { it.value })
+        .mapValues { it.value.sum() }
+        .maxByOrNull { it.value }?.key
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -154,7 +215,7 @@ fun IntelligenceCard() {
                     .padding(horizontal = 8.dp, vertical = 2.dp)
             ) {
                 Text(
-                    text = "CELL: 7Q9Y",
+                    text = "CELL: $mostSevereCell",
                     color = HighlightText,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
@@ -166,19 +227,21 @@ fun IntelligenceCard() {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            StatBox(value = "34", label = "Active Requests", modifier = Modifier.weight(1f))
-            StatBox(value = "8.4", label = "Area Severity Score", modifier = Modifier.weight(1f))
+            StatBox(value = "${activeRequests.size}", label = "Active Requests", modifier = Modifier.weight(1f))
+            StatBox(value = "$totalSeverity", label = "Area Severity Score", modifier = Modifier.weight(1f))
         }
         Spacer(modifier = Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("📍", fontSize = 14.sp)
-            Text(
-                text = "High concentration of Medical requests near Market St. sector.",
-                color = HighlightSubtitle,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                lineHeight = 16.sp
-            )
+        if (topCategory != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("📍", fontSize = 14.sp)
+                Text(
+                    text = "High concentration of ${topCategory.name} requests detected.",
+                    color = HighlightSubtitle,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 16.sp
+                )
+            }
         }
     }
 }
@@ -197,7 +260,7 @@ fun StatBox(value: String, label: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun RequestsList() {
+fun RequestsList(requests: List<EmergencyRequest>, onResolve: (EmergencyRequest) -> Unit) {
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -222,39 +285,41 @@ fun RequestsList() {
             )
         }
         
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            item { RequestItem(title = "Medical Supply: Insulin", priority = "Critical", details = "200m away • Sector 4B • Ref: #A92", type = "medical") }
-            item { RequestItem(title = "Potable Water Need", priority = "Urgent", details = "450m away • Aggregated (5 reports)", type = "water") }
-            item { RequestItem(title = "Blocked Road Clearance", priority = "Resolved", details = "Stopped propagation across mesh", type = "resolved") }
+        if (requests.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No active requests.", color = TextSecondary)
+            }
+        } else {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(requests, key = { it.id }) { req ->
+                    RequestItem(req, onResolve)
+                }
+            }
         }
     }
 }
 
 @Composable
-fun RequestItem(title: String, priority: String, details: String, type: String) {
-    val attrs = when(type) {
-        "medical" -> listOf("+", CriticalText, CriticalIconBg, CriticalText, CriticalBg, 1f)
-        "water" -> listOf("💧", UrgentText, UrgentIconBg, UrgentText, UrgentBg, 1f)
-        else -> listOf("✓", ResolvedText, ResolvedIconBg, ResolvedText, ResolvedBg, 0.6f)
-    }
-    val icon = attrs[0] as String
-    val iconColor = attrs[1] as Color
-    val iconBg = attrs[2] as Color
-    val tagColor = attrs[3] as Color
-    val tagBg = attrs[4] as Color
-    val alpha = attrs[5] as Float
+fun RequestItem(request: EmergencyRequest, onResolve: (EmergencyRequest) -> Unit) {
+    val isCritical = request.severity >= 8
+    val icon = if (request.type == Category.MEDICAL) "+" else if (request.type == Category.WATER) "💧" else "⚠️"
+    val iconColor = if (isCritical) CriticalText else UrgentText
+    val iconBg = if (isCritical) CriticalIconBg else UrgentIconBg
+    val tagColor = if (isCritical) CriticalText else UrgentText
+    val tagBg = if (isCritical) CriticalBg else UrgentBg
+    val priority = if (isCritical) "CRITICAL" else "URGENT"
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(Surface.copy(alpha = alpha))
-            .border(1.dp, Color(0xFFE2E8F0).copy(alpha = alpha), RoundedCornerShape(16.dp))
-            .padding(16.dp)
-            .clickable { },
+            .background(Surface)
+            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
+            .clickable { onResolve(request) }
+            .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -262,10 +327,10 @@ fun RequestItem(title: String, priority: String, details: String, type: String) 
             modifier = Modifier
                 .size(48.dp)
                 .clip(CircleShape)
-                .background(iconBg as Color),
+                .background(iconBg),
             contentAlignment = Alignment.Center
         ) {
-            Text(text = icon as String, color = iconColor as Color, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text(text = icon, color = iconColor, fontWeight = FontWeight.Bold, fontSize = 20.sp)
         }
         Column(modifier = Modifier.weight(1f)) {
             Row(
@@ -274,7 +339,7 @@ fun RequestItem(title: String, priority: String, details: String, type: String) 
                 verticalAlignment = Alignment.Top
             ) {
                 Text(
-                    text = title,
+                    text = "${request.type.name} NEED",
                     color = TextPrimary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp,
@@ -284,33 +349,42 @@ fun RequestItem(title: String, priority: String, details: String, type: String) 
                 )
                 Box(
                     modifier = Modifier
-                        .background(tagBg as Color, RoundedCornerShape(4.dp))
+                        .background(tagBg, RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = priority.uppercase(),
-                        color = tagColor as Color,
+                        text = priority,
+                        color = tagColor,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
-            Text(text = details, color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                text = "Lat: ${request.latitude} | Lon: ${request.longitude}", 
+                color = TextSecondary, 
+                fontSize = 12.sp, 
+                maxLines = 1, 
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
 
 @Composable
-fun BottomNavBar() {
+fun BottomNavBar(navController: NavHostController) {
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+
     NavigationBar(
         containerColor = Surface,
         contentColor = TextSecondary,
         tonalElevation = 8.dp
     ) {
         NavigationBarItem(
-            selected = true,
-            onClick = { },
+            selected = currentRoute == "requests",
+            onClick = { navController.navigate("requests") { launchSingleTop = true; restoreState = true } },
             icon = { Text("📋", fontSize = 20.sp) },
             label = { Text("REQUESTS", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
             colors = NavigationBarItemDefaults.colors(
@@ -320,44 +394,102 @@ fun BottomNavBar() {
             )
         )
         NavigationBarItem(
-            selected = false,
-            onClick = { },
+            selected = currentRoute == "map",
+            onClick = { navController.navigate("map") { launchSingleTop = true; restoreState = true } },
             icon = { Text("🗺️", fontSize = 20.sp) },
-            label = { Text("MAP", fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+            label = { Text("MAP", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = BrandPrimary,
+                selectedTextColor = BrandPrimary,
+                indicatorColor = Color.Transparent
+            )
         )
         Spacer(modifier = Modifier.weight(1f)) // Space for FAB
         NavigationBarItem(
-            selected = false,
-            onClick = { },
+            selected = currentRoute == "history",
+            onClick = { navController.navigate("history") { launchSingleTop = true; restoreState = true } },
             icon = { Text("🔄", fontSize = 20.sp) },
-            label = { Text("HISTORY", fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+            label = { Text("HISTORY", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = BrandPrimary,
+                selectedTextColor = BrandPrimary,
+                indicatorColor = Color.Transparent
+            )
         )
         NavigationBarItem(
-            selected = false,
-            onClick = { },
+            selected = currentRoute == "profile",
+            onClick = { navController.navigate("profile") { launchSingleTop = true; restoreState = true } },
             icon = { Text("👤", fontSize = 20.sp) },
-            label = { Text("PROFILE", fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+            label = { Text("PROFILE", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = BrandPrimary,
+                selectedTextColor = BrandPrimary,
+                indicatorColor = Color.Transparent
+            )
         )
     }
 }
 
 @Composable
-fun CustomFab() {
+fun CustomFab(onClick: () -> Unit) {
     FloatingActionButton(
-        onClick = { },
+        onClick = onClick,
         containerColor = BrandPrimary,
         contentColor = Color.White,
         shape = CircleShape,
         modifier = Modifier.offset(y = 36.dp)
     ) {
-        Icon(Icons.Default.Add, contentDescription = "Add", modifier = Modifier.size(32.dp))
+        Icon(Icons.Default.Add, contentDescription = "Add Request", modifier = Modifier.size(32.dp))
     }
 }
 
-@Preview(showBackground = true)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MeshLinkPreview() {
-    MyApplicationTheme {
-        MeshLinkScreen()
-    }
+fun AddRequestDialog(
+    onDismiss: () -> Unit,
+    onSubmit: (Category, Double, Double, Int) -> Unit
+) {
+    var selectedCategory by remember { mutableStateOf(Category.MEDICAL) }
+    var severity by remember { mutableStateOf(5f) }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New Emergency Request") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Category:")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Category.values().take(3).forEach { cat ->
+                        FilterChip(
+                            selected = selectedCategory == cat,
+                            onClick = { selectedCategory = cat },
+                            label = { Text(cat.name) }
+                        )
+                    }
+                }
+                Text("Severity (1-10): ${severity.toInt()}")
+                Slider(
+                    value = severity,
+                    onValueChange = { severity = it },
+                    valueRange = 1f..10f,
+                    steps = 8
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { 
+                // Using dummy coordinates for simplicity representing the local device
+                val dummyLat = 34.0522 + (Math.random() * 0.01)
+                val dummyLon = -118.2437 + (Math.random() * 0.01)
+                onSubmit(selectedCategory, dummyLat, dummyLon, severity.toInt()) 
+            }) {
+                Text("Broadcast")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
