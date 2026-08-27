@@ -12,7 +12,7 @@
     <!-- Android 12+ (API 31+) Bluetooth Permissions -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
     
     <!-- Android 13+ (API 33+) Wi-Fi Permission -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />

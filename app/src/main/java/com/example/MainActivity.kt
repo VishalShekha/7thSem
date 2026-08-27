@@ -1,6 +1,13 @@
 package com.example
 
+import android.Manifest
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.content.Intent
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -21,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +47,8 @@ import com.example.ui.screens.MapScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.theme.*
 import com.example.viewmodel.MeshViewModel
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,49 +57,147 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 val viewModel: MeshViewModel = viewModel()
-                val navController = rememberNavController()
-                var showAddDialog by remember { mutableStateOf(false) }
+                
+                MeshAppContent(viewModel = viewModel)
+            }
+        }
+    }
+}
 
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    bottomBar = { BottomNavBar(navController) },
-                    floatingActionButton = { 
-                        CustomFab { showAddDialog = true } 
-                    },
-                    floatingActionButtonPosition = FabPosition.Center
-                ) { innerPadding ->
-                    NavHost(
-                        navController = navController,
-                        startDestination = "requests",
-                        modifier = Modifier.padding(innerPadding)
-                    ) {
-                        composable("requests") {
-                            RequestsScreen(viewModel)
-                        }
-                        composable("map") {
-                            val active = viewModel.activeRequests.collectAsState().value
-                            MapScreen(activeRequests = active)
-                        }
-                        composable("history") {
-                            val resolved = viewModel.resolvedRequests.collectAsState().value
-                            HistoryScreen(resolvedRequests = resolved)
-                        }
-                        composable("profile") {
-                            ProfileScreen(nodeId = viewModel.nodeId)
-                        }
-                    }
+@OptIn(ExperimentalPermissionsApi::class)
+@Composable
+fun MeshAppContent(viewModel: MeshViewModel) {
+    val context = LocalContext.current
+    val permissions = mutableListOf<String>()
+    
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+    } else {
+        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+    }
 
-                    if (showAddDialog) {
-                        AddRequestDialog(
-                            onDismiss = { showAddDialog = false },
-                            onSubmit = { type, lat, lon, severity ->
-                                viewModel.createNewRequest(type, lat, lon, severity)
-                                showAddDialog = false
-                            }
-                        )
-                    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+    }
+
+    val permissionsState = rememberMultiplePermissionsState(permissions)
+
+    var hasHardwareEnabled by remember { mutableStateOf(false) }
+
+    LaunchedEffect(permissionsState.allPermissionsGranted, hasHardwareEnabled) {
+        if (permissionsState.allPermissionsGranted && hasHardwareEnabled) {
+            viewModel.startMesh()
+        }
+    }
+
+    if (!permissionsState.allPermissionsGranted) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("Permissions Required", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "MeshLink needs Nearby Devices, Bluetooth, and Location permissions to discover and connect to peers offline.",
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(32.dp))
+            Button(onClick = { permissionsState.launchMultiplePermissionRequest() }) {
+                Text("Grant Permissions")
+            }
+            if (permissionsState.shouldShowRationale) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    "Please grant these permissions in settings if you've permanently denied them.",
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        }
+        return
+    }
+
+    // Check hardware states
+    val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    val isBluetoothEnabled = bluetoothManager.adapter?.isEnabled == true
+    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    val isWifiEnabled = wifiManager.isWifiEnabled
+
+    hasHardwareEnabled = isBluetoothEnabled && isWifiEnabled
+
+    if (!hasHardwareEnabled) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("Enable Radios", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "Please enable both Bluetooth and Wi-Fi so MeshLink can form the offline network.",
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            if (!isBluetoothEnabled) {
+                Button(onClick = { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }) {
+                    Text("Enable Bluetooth")
                 }
             }
+            if (!isWifiEnabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = { context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }) {
+                    Text("Enable Wi-Fi")
+                }
+            }
+        }
+        return
+    }
+
+    // Main App UI
+    val navController = rememberNavController()
+    var showAddDialog by remember { mutableStateOf(false) }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        bottomBar = { BottomNavBar(navController) },
+        floatingActionButton = { 
+            CustomFab { showAddDialog = true } 
+        },
+        floatingActionButtonPosition = FabPosition.Center
+    ) { innerPadding ->
+        NavHost(
+            navController = navController,
+            startDestination = "requests",
+            modifier = Modifier.padding(innerPadding)
+        ) {
+            composable("requests") {
+                RequestsScreen(viewModel)
+            }
+            composable("map") {
+                val active = viewModel.activeRequests.collectAsState().value
+                MapScreen(activeRequests = active)
+            }
+            composable("history") {
+                val resolved = viewModel.resolvedRequests.collectAsState().value
+                HistoryScreen(resolvedRequests = resolved)
+            }
+            composable("profile") {
+                ProfileScreen(nodeId = viewModel.nodeId)
+            }
+        }
+
+        if (showAddDialog) {
+            AddRequestDialog(
+                onDismiss = { showAddDialog = false },
+                onSubmit = { type, lat, lon, severity ->
+                    viewModel.createNewRequest(type, lat, lon, severity)
+                    showAddDialog = false
+                }
+            )
         }
     }
 }

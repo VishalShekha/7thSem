@@ -58,7 +58,9 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        
+    }
+
+    fun startMesh() {
         viewModelScope.launch {
             transport.startAdvertisingAndDiscovering()
         }
