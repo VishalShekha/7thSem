@@ -185,8 +185,15 @@ fun MeshAppContent(viewModel: MeshViewModel) {
                 val resolved = viewModel.resolvedRequests.collectAsState().value
                 HistoryScreen(resolvedRequests = resolved)
             }
-            composable("profile") {
-                ProfileScreen(nodeId = viewModel.nodeId)
+            composable("network") {
+                val discovered = viewModel.discoveredPeers.collectAsState().value
+                val connected = viewModel.connectedPeersList.collectAsState().value
+                com.example.ui.screens.NetworkScreen(
+                    nodeId = viewModel.nodeId,
+                    discoveredPeers = discovered,
+                    connectedPeers = connected,
+                    onConnect = { viewModel.connectToPeer(it) }
+                )
             }
         }
 
@@ -206,7 +213,7 @@ fun MeshAppContent(viewModel: MeshViewModel) {
 fun RequestsScreen(viewModel: MeshViewModel) {
     val activeRequests by viewModel.activeRequests.collectAsState()
     val areaSummaries by viewModel.areaSummaries.collectAsState()
-    val peers by viewModel.connectedPeers.collectAsState()
+    val peers by viewModel.connectedPeersCount.collectAsState()
 
     Column(
         modifier = Modifier
@@ -525,10 +532,10 @@ fun BottomNavBar(navController: NavHostController) {
             )
         )
         NavigationBarItem(
-            selected = currentRoute == "profile",
-            onClick = { navController.navigate("profile") { launchSingleTop = true; restoreState = true } },
-            icon = { Text("👤", fontSize = 20.sp) },
-            label = { Text("PROFILE", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
+            selected = currentRoute == "network",
+            onClick = { navController.navigate("network") { launchSingleTop = true; restoreState = true } },
+            icon = { Text("📡", fontSize = 20.sp) },
+            label = { Text("NETWORK", fontSize = 10.sp, fontWeight = FontWeight.Bold) },
             colors = NavigationBarItemDefaults.colors(
                 selectedIconColor = BrandPrimary,
                 selectedTextColor = BrandPrimary,

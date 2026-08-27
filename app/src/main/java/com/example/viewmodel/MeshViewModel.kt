@@ -31,7 +31,9 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val _areaSummaries = MutableStateFlow<Map<String, AreaSummary>>(emptyMap())
     val areaSummaries: StateFlow<Map<String, AreaSummary>> = _areaSummaries
     
-    val connectedPeers = transport.connectedPeersCount.stateIn(viewModelScope, SharingStarted.Lazily, 0)
+    val connectedPeersCount = transport.connectedPeersCount.stateIn(viewModelScope, SharingStarted.Lazily, 0)
+    val discoveredPeers = transport.discoveredPeers.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val connectedPeersList = transport.connectedPeers.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val nodeId = UUID.randomUUID().toString().take(8)
 
@@ -63,6 +65,12 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     fun startMesh() {
         viewModelScope.launch {
             transport.startAdvertisingAndDiscovering()
+        }
+    }
+
+    fun connectToPeer(endpointId: String) {
+        viewModelScope.launch {
+            transport.connectToPeer(endpointId)
         }
     }
 
