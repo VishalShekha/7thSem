@@ -15,6 +15,8 @@ import java.util.UUID
 import com.example.network.NetworkMonitor
 import com.example.network.RetrofitClient
 import android.util.Log
+import kotlinx.coroutines.flow.first
+
 
 class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
@@ -28,8 +30,13 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     
     // Network monitor for GitHub pages / Cloud Sync
     private val networkMonitor = NetworkMonitor(application)
-    val isOnline = networkMonitor.isOnline.stateIn(viewModelScope, SharingStarted.Lazily, false)
-    
+
+    val isOnline: StateFlow<Boolean> =
+        networkMonitor.isOnline.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            false
+        )
     private val _activeRequests = MutableStateFlow<List<EmergencyRequest>>(emptyList())
     val activeRequests: StateFlow<List<EmergencyRequest>> = _activeRequests
     
@@ -70,30 +77,106 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         }
         // 3. Monitor internet connection and sync to cloud if available
         viewModelScope.launch {
-            isOnline.collect { online ->
-                if (online) {
-                    syncToCloud()
+            isOnline
+                .collect { online ->
+
+                    Log.d(
+                        "CloudSync",
+                        "Network status received: online=$online"
+                    )
+
+                    if (online) {
+
+                        Log.d(
+                            "CloudSync",
+                            "Network is online -> calling syncToCloud()"
+                        )
+
+                        syncToCloud()
+                    }
                 }
-            }
         }
     }
 
     private fun syncToCloud() {
+
+        Log.d(
+            "CloudSync",
+            "========== syncToCloud() CALLED =========="
+        )
+
         viewModelScope.launch {
+
             try {
-                val allRequests = coreModule.getAllRequests()
-                if (allRequests.isNotEmpty()) {
-                    RetrofitClient.api.syncRequests(allRequests)
-                    Log.d("CloudSync", "Successfully synced ${allRequests.size} requests to cloud")
+
+                Log.d(
+                    "CloudSync",
+                    "Reading requests directly from Room..."
+                )
+
+                val allRequests = requestDao
+                    .getAllRequests()
+                    .first()
+                    .map { it.toDomainModel() }
+
+                Log.d(
+                    "CloudSync",
+                    "Found ${allRequests.size} request(s)"
+                )
+
+                if (allRequests.isEmpty()) {
+
+                    Log.d(
+                        "CloudSync",
+                        "No requests to sync"
+                    )
+
+                    return@launch
                 }
+
+                val baseUrl =
+                    RetrofitClient.getBaseUrl(getApplication())
+
+                Log.d(
+                    "CloudSync",
+                    "Syncing ${allRequests.size} requests to $baseUrl"
+                )
+
+                val response =
+                    RetrofitClient
+                        .getApi(getApplication())
+                        .syncRequests(allRequests)
+
+                Log.d(
+                    "CloudSync",
+                    "HTTP ${response.code()} | success=${response.isSuccessful}"
+                )
+
+                if (response.isSuccessful) {
+
+                    Log.d(
+                        "CloudSync",
+                        "Successfully synced ${allRequests.size} requests"
+                    )
+
+                } else {
+
+                    Log.e(
+                        "CloudSync",
+                        "SYNC FAILED: ${response.errorBody()?.string()}"
+                    )
+                }
+
             } catch (e: Exception) {
-                // Fails because GitHub Pages is static and doesn't actually have a POST endpoint,
-                // but this completes the data push architecture.
-                Log.e("CloudSync", "Failed to sync to cloud (Expected if using static GitHub Pages without a backend)", e)
+
+                Log.e(
+                    "CloudSync",
+                    "Failed to sync to cloud",
+                    e
+                )
             }
         }
     }
-
     fun startMesh() {
         viewModelScope.launch {
             transport.startAdvertisingAndDiscovering()
