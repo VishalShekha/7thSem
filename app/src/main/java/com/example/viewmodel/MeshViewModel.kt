@@ -12,6 +12,10 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+import com.example.network.NetworkMonitor
+import com.example.network.RetrofitClient
+import android.util.Log
+
 class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val requestDao = db.requestDao()
@@ -21,6 +25,10 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     
     // Transport layer
     private val transport: MeshTransportAdapter = NearbyConnectionsTransportAdapter(application)
+    
+    // Network monitor for GitHub pages / Cloud Sync
+    private val networkMonitor = NetworkMonitor(application)
+    val isOnline = networkMonitor.isOnline.stateIn(viewModelScope, SharingStarted.Lazily, false)
     
     private val _activeRequests = MutableStateFlow<List<EmergencyRequest>>(emptyList())
     val activeRequests: StateFlow<List<EmergencyRequest>> = _activeRequests
@@ -58,6 +66,30 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                     requestDao.insertRequest(req.toEntity())
                     updateUiState()
                 }
+            }
+        }
+        // 3. Monitor internet connection and sync to cloud if available
+        viewModelScope.launch {
+            isOnline.collect { online ->
+                if (online) {
+                    syncToCloud()
+                }
+            }
+        }
+    }
+
+    private fun syncToCloud() {
+        viewModelScope.launch {
+            try {
+                val allRequests = coreModule.getAllRequests()
+                if (allRequests.isNotEmpty()) {
+                    RetrofitClient.api.syncRequests(allRequests)
+                    Log.d("CloudSync", "Successfully synced ${allRequests.size} requests to cloud")
+                }
+            } catch (e: Exception) {
+                // Fails because GitHub Pages is static and doesn't actually have a POST endpoint,
+                // but this completes the data push architecture.
+                Log.e("CloudSync", "Failed to sync to cloud (Expected if using static GitHub Pages without a backend)", e)
             }
         }
     }

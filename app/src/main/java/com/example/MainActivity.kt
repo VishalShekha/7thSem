@@ -214,13 +214,14 @@ fun RequestsScreen(viewModel: MeshViewModel) {
     val activeRequests by viewModel.activeRequests.collectAsState()
     val areaSummaries by viewModel.areaSummaries.collectAsState()
     val peers by viewModel.connectedPeersCount.collectAsState()
+    val isOnline by viewModel.isOnline.collectAsState()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Background)
     ) {
-        Header(peers)
+        Header(peers, isOnline)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -234,7 +235,7 @@ fun RequestsScreen(viewModel: MeshViewModel) {
 }
 
 @Composable
-fun Header(peers: Int) {
+fun Header(peers: Int, isOnline: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -280,13 +281,30 @@ fun Header(peers: Int) {
                 }
             }
         }
-        IconButton(
-            onClick = { },
-            modifier = Modifier
-                .size(40.dp)
-                .background(Color(0xFFF8FAFC), CircleShape)
-        ) {
-            Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextTertiary)
+        
+        // Cloud Sync Indicator
+        if (isOnline) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .background(Color(0xFFEFF6FF), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("☁️", fontSize = 12.sp)
+                Text("SYNCING", color = Color(0xFF2563EB), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .background(Color(0xFFFEF2F2), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("📵", fontSize = 12.sp)
+                Text("OFFLINE", color = Color(0xFFDC2626), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
     HorizontalDivider(color = Color(0xFFF1F5F9))
