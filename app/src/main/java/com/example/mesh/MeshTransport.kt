@@ -19,7 +19,8 @@ interface MeshTransportAdapter {
     val connectedPeersCount: Flow<Int>
     val discoveredPeers: Flow<List<MeshPeer>>
     val connectedPeers: Flow<List<MeshPeer>>
-    
+    val startupErrors: Flow<String>
+
     fun startAdvertisingAndDiscovering()
     fun connectToPeer(endpointId: String)
     fun broadcastRequest(request: EmergencyRequest)
@@ -28,25 +29,29 @@ interface MeshTransportAdapter {
 
 class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTransportAdapter {
     private val TAG = "MeshTransport"
-    
+
     private val SERVICE_ID = "com.example.meshlink.SERVICE_ID"
     private val STRATEGY = Strategy.P2P_CLUSTER
     private val myEndpointName = UUID.randomUUID().toString().take(6)
-    
+
     private val _incomingRequests = MutableSharedFlow<EmergencyRequest>(extraBufferCapacity = 100)
     override val incomingRequests: Flow<EmergencyRequest> = _incomingRequests
-    
+
     private val _connectedPeersCount = MutableStateFlow(0)
     override val connectedPeersCount: Flow<Int> = _connectedPeersCount
-    
+
     private val _discoveredPeers = MutableStateFlow<List<MeshPeer>>(emptyList())
     override val discoveredPeers: Flow<List<MeshPeer>> = _discoveredPeers
-    
+
     private val _connectedPeers = MutableStateFlow<List<MeshPeer>>(emptyList())
     override val connectedPeers: Flow<List<MeshPeer>> = _connectedPeers
-    
+
+    // Surfaces advertising/discovery startup failures so the UI can react (e.g. show a Toast)
+    private val _startupErrors = MutableSharedFlow<String>(extraBufferCapacity = 10)
+    override val startupErrors: Flow<String> = _startupErrors
+
     private val connectedEndpoints = mutableSetOf<String>()
-    
+
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
     private val jsonAdapter = moshi.adapter(EmergencyRequest::class.java)
 
@@ -72,7 +77,12 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, connectionInfo: ConnectionInfo) {
-            Log.d(TAG, "Connection initiated by $endpointId")
+            Log.d(
+                TAG,
+                "Connection initiated by $endpointId | endpointName=${connectionInfo.endpointName} " +
+                        "isIncomingConnection=${connectionInfo.isIncomingConnection} " +
+                        "authDigits=${connectionInfo.authenticationDigits}"
+            )
             Nearby.getConnectionsClient(context).acceptConnection(endpointId, payloadCallback)
         }
 
@@ -81,7 +91,7 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
                 Log.d(TAG, "Connected to $endpointId")
                 connectedEndpoints.add(endpointId)
                 _connectedPeersCount.value = connectedEndpoints.size
-                
+
                 val peer = _discoveredPeers.value.find { it.id == endpointId } ?: MeshPeer(endpointId, "Unknown")
                 val currentList = _connectedPeers.value.toMutableList()
                 if (!currentList.any { it.id == endpointId }) {
@@ -89,7 +99,7 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
                     _connectedPeers.value = currentList
                 }
             } else {
-                Log.w(TAG, "Connection failed to $endpointId")
+                Log.w(TAG, "Connection failed to $endpointId, status=${result.status.statusCode}")
             }
         }
 
@@ -97,7 +107,7 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
             Log.d(TAG, "Disconnected from $endpointId")
             connectedEndpoints.remove(endpointId)
             _connectedPeersCount.value = connectedEndpoints.size
-            
+
             _connectedPeers.value = _connectedPeers.value.filter { it.id != endpointId }
         }
     }
@@ -111,13 +121,21 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
                 currentList.add(newPeer)
                 _discoveredPeers.value = currentList
             }
-            
-            // Auto request
-            Nearby.getConnectionsClient(context).requestConnection(
-                myEndpointName,
-                endpointId,
-                connectionLifecycleCallback
-            )
+
+            // Initiator logic: without this, both sides of a discovered pair would each call
+            // requestConnection() simultaneously, which can race/collide. Instead, only the
+            // side with the lexicographically smaller endpoint name initiates; the other side
+            // just waits to accept the incoming request in onConnectionInitiated.
+            if (myEndpointName < endpointId) {
+                Log.d(TAG, "Acting as initiator ($myEndpointName < $endpointId), requesting connection")
+                Nearby.getConnectionsClient(context).requestConnection(
+                    myEndpointName,
+                    endpointId,
+                    connectionLifecycleCallback
+                )
+            } else {
+                Log.d(TAG, "Not initiating to $endpointId ($myEndpointName >= $endpointId), waiting for their request")
+            }
         }
 
         override fun onEndpointLost(endpointId: String) {
@@ -125,7 +143,7 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
             _discoveredPeers.value = _discoveredPeers.value.filter { it.id != endpointId }
         }
     }
-    
+
     override fun connectToPeer(endpointId: String) {
         Nearby.getConnectionsClient(context).requestConnection(
             myEndpointName,
@@ -145,14 +163,24 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
             SERVICE_ID,
             connectionLifecycleCallback,
             advertisingOptions
-        )
+        ).addOnSuccessListener {
+            Log.d(TAG, "Advertising started successfully as $myEndpointName")
+        }.addOnFailureListener { e ->
+            Log.e(TAG, "Failed to start advertising", e)
+            _startupErrors.tryEmit("Failed to start advertising: ${e.message}")
+        }
 
         val discoveryOptions = DiscoveryOptions.Builder().setStrategy(STRATEGY).build()
         Nearby.getConnectionsClient(context).startDiscovery(
             SERVICE_ID,
             endpointDiscoveryCallback,
             discoveryOptions
-        )
+        ).addOnSuccessListener {
+            Log.d(TAG, "Discovery started successfully")
+        }.addOnFailureListener { e ->
+            Log.e(TAG, "Failed to start discovery", e)
+            _startupErrors.tryEmit("Failed to start discovery: ${e.message}")
+        }
     }
 
     override fun broadcastRequest(request: EmergencyRequest) {
@@ -160,7 +188,7 @@ class NearbyConnectionsTransportAdapter(private val context: Context) : MeshTran
             Log.d(TAG, "No peers connected to broadcast to.")
             return
         }
-        
+
         try {
             val json = jsonAdapter.toJson(request)
             val payload = Payload.fromBytes(json.toByteArray())

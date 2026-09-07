@@ -17,17 +17,23 @@ import com.example.network.RetrofitClient
 import android.util.Log
 import kotlinx.coroutines.flow.first
 
+enum class SyncStatus {
+    SUCCESS,
+    FAILED,
+    IN_PROGRESS
+}
 
 class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val requestDao = db.requestDao()
-    
+
     // Core module isolated from Android
     private val coreModule = InformationProcessingModule()
-    
+
     // Transport layer
-    private val transport: MeshTransportAdapter = NearbyConnectionsTransportAdapter(application)
-    
+    private val transport: MeshTransportAdapter =
+        NearbyConnectionsTransportAdapter(application)
+
     // Network monitor for GitHub pages / Cloud Sync
     private val networkMonitor = NetworkMonitor(application)
 
@@ -37,18 +43,49 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
             SharingStarted.Eagerly,
             false
         )
-    private val _activeRequests = MutableStateFlow<List<EmergencyRequest>>(emptyList())
+
+    private val _activeRequests =
+        MutableStateFlow<List<EmergencyRequest>>(emptyList())
     val activeRequests: StateFlow<List<EmergencyRequest>> = _activeRequests
-    
-    private val _resolvedRequests = MutableStateFlow<List<EmergencyRequest>>(emptyList())
+
+    private val _resolvedRequests =
+        MutableStateFlow<List<EmergencyRequest>>(emptyList())
     val resolvedRequests: StateFlow<List<EmergencyRequest>> = _resolvedRequests
 
-    private val _areaSummaries = MutableStateFlow<Map<String, AreaSummary>>(emptyMap())
+    private val _areaSummaries =
+        MutableStateFlow<Map<String, AreaSummary>>(emptyMap())
     val areaSummaries: StateFlow<Map<String, AreaSummary>> = _areaSummaries
-    
-    val connectedPeersCount = transport.connectedPeersCount.stateIn(viewModelScope, SharingStarted.Lazily, 0)
-    val discoveredPeers = transport.discoveredPeers.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    val connectedPeersList = transport.connectedPeers.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    // Cloud sync status surfaced to the UI
+    private val _syncStatus =
+        MutableStateFlow<SyncStatus>(SyncStatus.SUCCESS)
+    val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+
+    val connectedPeersCount =
+        transport.connectedPeersCount.stateIn(
+            viewModelScope,
+            SharingStarted.Lazily,
+            0
+        )
+
+    val discoveredPeers =
+        transport.discoveredPeers.stateIn(
+            viewModelScope,
+            SharingStarted.Lazily,
+            emptyList()
+        )
+
+    val connectedPeersList =
+        transport.connectedPeers.stateIn(
+            viewModelScope,
+            SharingStarted.Lazily,
+            emptyList()
+        )
+
+    // Surfaced so the UI (MainActivity) can show a Toast/snackbar when the mesh fails to start.
+    private val _meshStartupErrors =
+        MutableSharedFlow<String>(extraBufferCapacity = 10)
+    val meshStartupErrors: SharedFlow<String> = _meshStartupErrors
 
     val nodeId = UUID.randomUUID().toString().take(8)
 
@@ -57,13 +94,15 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             requestDao.getAllRequests().collect { entities ->
                 val requests = entities.map { it.toDomainModel() }
-                
-                requests.forEach { coreModule.processIncomingRequest(it) }
-                
+
+                requests.forEach {
+                    coreModule.processIncomingRequest(it)
+                }
+
                 updateUiState()
             }
         }
-        
+
         // 2. Listen for incoming mesh network requests
         viewModelScope.launch {
             transport.incomingRequests.collect { req ->
@@ -72,30 +111,60 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                     // Cache locally if it's new
                     requestDao.insertRequest(req.toEntity())
                     updateUiState()
+
+                    // Propagate to other peers so it flood-fills across the mesh,
+                    // since our direct neighbors are not necessarily connected
+                    // to the original sender.
+                    transport.broadcastRequest(req)
                 }
             }
         }
+
         // 3. Monitor internet connection and sync to cloud if available
         viewModelScope.launch {
-            isOnline
-                .collect { online ->
+            isOnline.collect { online ->
+
+                Log.d(
+                    "CloudSync",
+                    "Network status received: online=$online"
+                )
+
+                if (online) {
 
                     Log.d(
                         "CloudSync",
-                        "Network status received: online=$online"
+                        "Network is online -> calling syncToCloud()"
                     )
 
-                    if (online) {
-
-                        Log.d(
-                            "CloudSync",
-                            "Network is online -> calling syncToCloud()"
-                        )
-
-                        syncToCloud()
-                    }
+                    syncToCloud()
                 }
+            }
         }
+
+        // 4. Relay mesh transport startup failures to the UI layer
+        viewModelScope.launch {
+            transport.startupErrors.collect { message ->
+                Log.e(
+                    "MeshViewModel",
+                    "Mesh startup error: $message"
+                )
+                _meshStartupErrors.tryEmit(message)
+            }
+        }
+    }
+
+    /**
+     * Update the cloud server base URL.
+     */
+    fun updateServerUrl(url: String) {
+        RetrofitClient.setBaseUrl(getApplication(), url)
+    }
+
+    /**
+     * Get the currently configured cloud server base URL.
+     */
+    fun getServerUrl(): String {
+        return RetrofitClient.getBaseUrl(getApplication())
     }
 
     private fun syncToCloud() {
@@ -106,6 +175,8 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         viewModelScope.launch {
+
+            _syncStatus.value = SyncStatus.IN_PROGRESS
 
             try {
 
@@ -131,6 +202,7 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                         "No requests to sync"
                     )
 
+                    _syncStatus.value = SyncStatus.SUCCESS
                     return@launch
                 }
 
@@ -159,12 +231,16 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                         "Successfully synced ${allRequests.size} requests"
                     )
 
+                    _syncStatus.value = SyncStatus.SUCCESS
+
                 } else {
 
                     Log.e(
                         "CloudSync",
                         "SYNC FAILED: ${response.errorBody()?.string()}"
                     )
+
+                    _syncStatus.value = SyncStatus.FAILED
                 }
 
             } catch (e: Exception) {
@@ -174,9 +250,12 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
                     "Failed to sync to cloud",
                     e
                 )
+
+                _syncStatus.value = SyncStatus.FAILED
             }
         }
     }
+
     fun startMesh() {
         viewModelScope.launch {
             transport.startAdvertisingAndDiscovering()
@@ -191,12 +270,30 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateUiState() {
         val all = coreModule.getAllRequests()
-        _activeRequests.value = all.filter { it.status != RequestStatus.RESOLVED }.sortedByDescending { it.severity }
-        _resolvedRequests.value = all.filter { it.status == RequestStatus.RESOLVED }.sortedByDescending { it.timestamp }
+
+        _activeRequests.value =
+            all.filter {
+                it.status != RequestStatus.RESOLVED
+            }.sortedByDescending {
+                it.severity
+            }
+
+        _resolvedRequests.value =
+            all.filter {
+                it.status == RequestStatus.RESOLVED
+            }.sortedByDescending {
+                it.timestamp
+            }
+
         _areaSummaries.value = coreModule.getAreaSummaries()
     }
-    
-    fun createNewRequest(type: Category, lat: Double, lon: Double, severity: Int) {
+
+    fun createNewRequest(
+        type: Category,
+        lat: Double,
+        lon: Double,
+        severity: Int
+    ) {
         val req = EmergencyRequest(
             id = UUID.randomUUID().toString(),
             type = type,
@@ -207,6 +304,7 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
             severity = severity,
             reporterId = nodeId
         )
+
         viewModelScope.launch {
             if (coreModule.processIncomingRequest(req)) {
                 requestDao.insertRequest(req.toEntity())
@@ -215,9 +313,12 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    
+
     fun resolveRequest(req: EmergencyRequest) {
-        val resolved = req.copy(status = RequestStatus.RESOLVED)
+        val resolved = req.copy(
+            status = RequestStatus.RESOLVED
+        )
+
         viewModelScope.launch {
             if (coreModule.processIncomingRequest(resolved)) {
                 requestDao.insertRequest(resolved.toEntity())
