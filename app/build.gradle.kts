@@ -94,6 +94,7 @@ dependencies {
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+  implementation("com.google.android.gms:play-services-location:21.3.0")
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 

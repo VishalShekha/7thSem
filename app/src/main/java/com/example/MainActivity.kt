@@ -50,6 +50,7 @@ import com.example.ui.screens.MapScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.theme.*
 import com.example.viewmodel.MeshViewModel
+import com.example.viewmodel.SyncStatus
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 
@@ -71,15 +72,17 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MeshAppContent(viewModel: MeshViewModel) {
     val context = LocalContext.current
-    val permissions = mutableListOf<String>()
+
+    // Location is needed on ALL Android versions (real GPS for requests)
+    val permissions = mutableListOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION
+    )
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
         permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         permissions.add(Manifest.permission.BLUETOOTH_SCAN)
-    } else {
-        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
     }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -100,6 +103,13 @@ fun MeshAppContent(viewModel: MeshViewModel) {
                 "Mesh failed to start: $message",
                 Toast.LENGTH_LONG
             ).show()
+        }
+    }
+
+    // Surface request creation errors (e.g. no GPS fix) as a Toast.
+    LaunchedEffect(Unit) {
+        viewModel.requestErrors.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -340,13 +350,9 @@ fun MeshAppContent(viewModel: MeshViewModel) {
                 onDismiss = {
                     showAddDialog = false
                 },
-                onSubmit = { type, lat, lon, severity ->
-                    viewModel.createNewRequest(
-                        type,
-                        lat,
-                        lon,
-                        severity
-                    )
+                onSubmit = { type, severity ->
+                    // Location is fetched from the real GPS inside the ViewModel
+                    viewModel.createNewRequest(type, severity)
                     showAddDialog = false
                 }
             )
@@ -360,13 +366,17 @@ fun RequestsScreen(viewModel: MeshViewModel) {
     val areaSummaries by viewModel.areaSummaries.collectAsState()
     val peers by viewModel.connectedPeersCount.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    val syncStatus by viewModel.syncStatus.collectAsState()
+
+    // Ask before resolving, so an accidental tap doesn't close an emergency
+    var pendingResolve by remember { mutableStateOf<EmergencyRequest?>(null) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Background)
     ) {
-        Header(peers, isOnline)
+        Header(peers, isOnline, syncStatus)
 
         Column(
             modifier = Modifier
@@ -382,15 +392,44 @@ fun RequestsScreen(viewModel: MeshViewModel) {
             RequestsList(
                 activeRequests,
                 onResolve = { req ->
-                    viewModel.resolveRequest(req)
+                    pendingResolve = req
                 }
             )
         }
     }
+
+    pendingResolve?.let { req ->
+        AlertDialog(
+            onDismissRequest = { pendingResolve = null },
+            title = { Text("Mark as resolved?") },
+            text = {
+                Text("${req.type.name} request will be marked resolved and broadcast to all peers.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.resolveRequest(req)
+                        pendingResolve = null
+                    }
+                ) {
+                    Text("Resolve")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingResolve = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
-fun Header(peers: Int, isOnline: Boolean) {
+fun Header(
+    peers: Int,
+    isOnline: Boolean,
+    syncStatus: SyncStatus
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -453,53 +492,58 @@ fun Header(peers: Int, isOnline: Boolean) {
             }
         }
 
-        // Cloud Sync Indicator
-        if (isOnline) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier
-                    .background(
-                        Color(0xFFEFF6FF),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(
-                        horizontal = 8.dp,
-                        vertical = 4.dp
-                    )
-            ) {
-                Text("☁️", fontSize = 12.sp)
+        // Cloud Sync Indicator (reflects the real sync state)
+        val emoji: String
+        val label: String
+        val textColor: Color
+        val bgColor: Color
 
-                Text(
-                    "SYNCING",
-                    color = Color(0xFF2563EB),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+        if (!isOnline) {
+            emoji = "📵"
+            label = "OFFLINE"
+            textColor = Color(0xFFDC2626)
+            bgColor = Color(0xFFFEF2F2)
         } else {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier
-                    .background(
-                        Color(0xFFFEF2F2),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(
-                        horizontal = 8.dp,
-                        vertical = 4.dp
-                    )
-            ) {
-                Text("📵", fontSize = 12.sp)
-
-                Text(
-                    "OFFLINE",
-                    color = Color(0xFFDC2626),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
-                )
+            when (syncStatus) {
+                SyncStatus.IN_PROGRESS -> {
+                    emoji = "☁️"
+                    label = "SYNCING"
+                    textColor = Color(0xFF2563EB)
+                    bgColor = Color(0xFFEFF6FF)
+                }
+                SyncStatus.SUCCESS -> {
+                    emoji = "✅"
+                    label = "SYNCED"
+                    textColor = Color(0xFF059669)
+                    bgColor = Color(0xFFECFDF5)
+                }
+                SyncStatus.FAILED -> {
+                    emoji = "⚠️"
+                    label = "SYNC FAILED"
+                    textColor = Color(0xFFB45309)
+                    bgColor = Color(0xFFFFFBEB)
+                }
             }
+        }
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .background(bgColor, RoundedCornerShape(8.dp))
+                .padding(
+                    horizontal = 8.dp,
+                    vertical = 4.dp
+                )
+        ) {
+            Text(emoji, fontSize = 12.sp)
+
+            Text(
+                label,
+                color = textColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 
@@ -996,7 +1040,7 @@ fun CustomFab(
 @Composable
 fun AddRequestDialog(
     onDismiss: () -> Unit,
-    onSubmit: (Category, Double, Double, Int) -> Unit
+    onSubmit: (Category, Int) -> Unit
 ) {
     var selectedCategory by remember {
         mutableStateOf(Category.MEDICAL)
@@ -1047,23 +1091,19 @@ fun AddRequestDialog(
                     valueRange = 1f..10f,
                     steps = 8
                 )
+
+                Text(
+                    "Your current GPS location will be attached.",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    // Using dummy coordinates for simplicity
-                    // representing the local device.
-                    val dummyLat =
-                        34.0522 + (Math.random() * 0.01)
-
-                    val dummyLon =
-                        -118.2437 + (Math.random() * 0.01)
-
                     onSubmit(
                         selectedCategory,
-                        dummyLat,
-                        dummyLon,
                         severity.toInt()
                     )
                 }

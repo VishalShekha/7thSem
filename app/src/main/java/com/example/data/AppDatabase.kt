@@ -14,6 +14,7 @@ data class EmergencyRequestEntity(
     val status: String,
     val severity: Int,
     val reporterId: String
+
 )
 
 @Dao

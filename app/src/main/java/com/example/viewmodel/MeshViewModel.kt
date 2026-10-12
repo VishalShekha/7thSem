@@ -1,6 +1,7 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.core.*
@@ -8,14 +9,14 @@ import com.example.data.AppDatabase
 import com.example.data.EmergencyRequestEntity
 import com.example.mesh.MeshTransportAdapter
 import com.example.mesh.NearbyConnectionsTransportAdapter
+import com.example.network.NetworkMonitor
+import com.example.network.RetrofitClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
-
-import com.example.network.NetworkMonitor
-import com.example.network.RetrofitClient
-import android.util.Log
-import kotlinx.coroutines.flow.first
 
 enum class SyncStatus {
     SUCCESS,
@@ -23,6 +24,7 @@ enum class SyncStatus {
     IN_PROGRESS
 }
 
+@OptIn(FlowPreview::class)
 class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val requestDao = db.requestDao()
@@ -34,7 +36,10 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val transport: MeshTransportAdapter =
         NearbyConnectionsTransportAdapter(application)
 
-    // Network monitor for GitHub pages / Cloud Sync
+    // Real GPS location
+    private val locationProvider = LocationProvider(application)
+
+    // Network monitor for Cloud Sync
     private val networkMonitor = NetworkMonitor(application)
 
     val isOnline: StateFlow<Boolean> =
@@ -58,7 +63,7 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
 
     // Cloud sync status surfaced to the UI
     private val _syncStatus =
-        MutableStateFlow<SyncStatus>(SyncStatus.SUCCESS)
+        MutableStateFlow(SyncStatus.SUCCESS)
     val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
 
     val connectedPeersCount =
@@ -82,12 +87,18 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
             emptyList()
         )
 
-    // Surfaced so the UI (MainActivity) can show a Toast/snackbar when the mesh fails to start.
+    // Mesh startup failures -> UI
     private val _meshStartupErrors =
         MutableSharedFlow<String>(extraBufferCapacity = 10)
     val meshStartupErrors: SharedFlow<String> = _meshStartupErrors
 
-    val nodeId = UUID.randomUUID().toString().take(8)
+    // Request creation failures (e.g. no GPS) -> UI
+    private val _requestErrors =
+        MutableSharedFlow<String>(extraBufferCapacity = 5)
+    val requestErrors: SharedFlow<String> = _requestErrors
+
+    // Stable ID: same value every time the app starts
+    val nodeId: String = DeviceIdentity.getId(application)
 
     init {
         // 1. Observe local DB and feed into core module to restore state
@@ -106,153 +117,82 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         // 2. Listen for incoming mesh network requests
         viewModelScope.launch {
             transport.incomingRequests.collect { req ->
-                // The core module decides if this is new/important
                 if (coreModule.processIncomingRequest(req)) {
-                    // Cache locally if it's new
                     requestDao.insertRequest(req.toEntity())
                     updateUiState()
 
-                    // Propagate to other peers so it flood-fills across the mesh,
-                    // since our direct neighbors are not necessarily connected
-                    // to the original sender.
+                    // Flood-fill across the mesh
                     transport.broadcastRequest(req)
                 }
             }
         }
 
-        // 3. Monitor internet connection and sync to cloud if available
+        // 3. AUTO SYNC: whenever we are online AND the DB changes, push to the
+        //    cloud. Retries with backoff if it fails. No app restart needed.
         viewModelScope.launch {
-            isOnline.collect { online ->
-
-                Log.d(
-                    "CloudSync",
-                    "Network status received: online=$online"
-                )
-
-                if (online) {
-
-                    Log.d(
-                        "CloudSync",
-                        "Network is online -> calling syncToCloud()"
-                    )
-
-                    syncToCloud()
-                }
+            combine(isOnline, requestDao.getAllRequests()) { online, entities ->
+                online to entities
             }
+                .debounce(1_000) // batch bursts of requests into one sync
+                .collectLatest { (online, entities) ->
+                    if (!online || entities.isEmpty()) return@collectLatest
+
+                    val requests = entities.map { it.toDomainModel() }
+                    var attempt = 0
+
+                    // collectLatest cancels this loop when new data / network state arrives
+                    while (!syncToCloud(requests)) {
+                        attempt++
+                        delay(minOf(30_000L, 2_000L * (1 shl attempt.coerceAtMost(4))))
+                    }
+                }
         }
 
         // 4. Relay mesh transport startup failures to the UI layer
         viewModelScope.launch {
             transport.startupErrors.collect { message ->
-                Log.e(
-                    "MeshViewModel",
-                    "Mesh startup error: $message"
-                )
+                Log.e("MeshViewModel", "Mesh startup error: $message")
                 _meshStartupErrors.tryEmit(message)
             }
         }
     }
 
-    /**
-     * Update the cloud server base URL.
-     */
+    /** Update the cloud server base URL. */
     fun updateServerUrl(url: String) {
         RetrofitClient.setBaseUrl(getApplication(), url)
     }
 
-    /**
-     * Get the currently configured cloud server base URL.
-     */
+    /** Get the currently configured cloud server base URL. */
     fun getServerUrl(): String {
         return RetrofitClient.getBaseUrl(getApplication())
     }
 
-    private fun syncToCloud() {
+    private suspend fun syncToCloud(requests: List<EmergencyRequest>): Boolean {
+        _syncStatus.value = SyncStatus.IN_PROGRESS
+        return try {
+            val baseUrl = RetrofitClient.getBaseUrl(getApplication())
+            Log.d("CloudSync", "Syncing ${requests.size} request(s) to $baseUrl")
 
-        Log.d(
-            "CloudSync",
-            "========== syncToCloud() CALLED =========="
-        )
+            val response = RetrofitClient
+                .getApi(getApplication())
+                .syncRequests(requests)
 
-        viewModelScope.launch {
+            Log.d("CloudSync", "HTTP ${response.code()} | success=${response.isSuccessful}")
 
-            _syncStatus.value = SyncStatus.IN_PROGRESS
-
-            try {
-
-                Log.d(
-                    "CloudSync",
-                    "Reading requests directly from Room..."
-                )
-
-                val allRequests = requestDao
-                    .getAllRequests()
-                    .first()
-                    .map { it.toDomainModel() }
-
-                Log.d(
-                    "CloudSync",
-                    "Found ${allRequests.size} request(s)"
-                )
-
-                if (allRequests.isEmpty()) {
-
-                    Log.d(
-                        "CloudSync",
-                        "No requests to sync"
-                    )
-
-                    _syncStatus.value = SyncStatus.SUCCESS
-                    return@launch
-                }
-
-                val baseUrl =
-                    RetrofitClient.getBaseUrl(getApplication())
-
-                Log.d(
-                    "CloudSync",
-                    "Syncing ${allRequests.size} requests to $baseUrl"
-                )
-
-                val response =
-                    RetrofitClient
-                        .getApi(getApplication())
-                        .syncRequests(allRequests)
-
-                Log.d(
-                    "CloudSync",
-                    "HTTP ${response.code()} | success=${response.isSuccessful}"
-                )
-
-                if (response.isSuccessful) {
-
-                    Log.d(
-                        "CloudSync",
-                        "Successfully synced ${allRequests.size} requests"
-                    )
-
-                    _syncStatus.value = SyncStatus.SUCCESS
-
-                } else {
-
-                    Log.e(
-                        "CloudSync",
-                        "SYNC FAILED: ${response.errorBody()?.string()}"
-                    )
-
-                    _syncStatus.value = SyncStatus.FAILED
-                }
-
-            } catch (e: Exception) {
-
-                Log.e(
-                    "CloudSync",
-                    "Failed to sync to cloud",
-                    e
-                )
-
+            if (response.isSuccessful) {
+                _syncStatus.value = SyncStatus.SUCCESS
+                true
+            } else {
+                Log.e("CloudSync", "SYNC FAILED: ${response.errorBody()?.string()}")
                 _syncStatus.value = SyncStatus.FAILED
+                false
             }
+        } catch (e: CancellationException) {
+            throw e // don't swallow cancellation from collectLatest
+        } catch (e: Exception) {
+            Log.e("CloudSync", "Failed to sync to cloud", e)
+            _syncStatus.value = SyncStatus.FAILED
+            false
         }
     }
 
@@ -272,40 +212,42 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         val all = coreModule.getAllRequests()
 
         _activeRequests.value =
-            all.filter {
-                it.status != RequestStatus.RESOLVED
-            }.sortedByDescending {
-                it.severity
-            }
+            all.filter { it.status != RequestStatus.RESOLVED }
+                .sortedByDescending { it.severity }
 
         _resolvedRequests.value =
-            all.filter {
-                it.status == RequestStatus.RESOLVED
-            }.sortedByDescending {
-                it.timestamp
-            }
+            all.filter { it.status == RequestStatus.RESOLVED }
+                .sortedByDescending { it.timestamp }
 
         _areaSummaries.value = coreModule.getAreaSummaries()
     }
 
+    /** Creates a request using the phone's REAL location. */
     fun createNewRequest(
         type: Category,
-        lat: Double,
-        lon: Double,
         severity: Int
     ) {
-        val req = EmergencyRequest(
-            id = UUID.randomUUID().toString(),
-            type = type,
-            latitude = lat,
-            longitude = lon,
-            timestamp = System.currentTimeMillis(),
-            status = RequestStatus.CREATED,
-            severity = severity,
-            reporterId = nodeId
-        )
-
         viewModelScope.launch {
+            val loc = locationProvider.getCurrentLocation()
+
+            if (loc == null) {
+                _requestErrors.tryEmit(
+                    "Couldn't get your location. Turn on GPS and allow location permission."
+                )
+                return@launch
+            }
+
+            val req = EmergencyRequest(
+                id = UUID.randomUUID().toString(),
+                type = type,
+                latitude = loc.latitude,
+                longitude = loc.longitude,
+                timestamp = System.currentTimeMillis(),
+                status = RequestStatus.CREATED,
+                severity = severity,
+                reporterId = nodeId
+            )
+
             if (coreModule.processIncomingRequest(req)) {
                 requestDao.insertRequest(req.toEntity())
                 updateUiState()
@@ -315,9 +257,7 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resolveRequest(req: EmergencyRequest) {
-        val resolved = req.copy(
-            status = RequestStatus.RESOLVED
-        )
+        val resolved = req.copy(status = RequestStatus.RESOLVED)
 
         viewModelScope.launch {
             if (coreModule.processIncomingRequest(resolved)) {
