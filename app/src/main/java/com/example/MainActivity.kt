@@ -377,6 +377,11 @@ fun RequestsScreen(viewModel: MeshViewModel) {
             .background(Background)
     ) {
         Header(peers, isOnline, syncStatus)
+        Row {
+            TextButton(onClick = { viewModel.benchPing() }) { Text("PING") }
+            TextButton(onClick = { viewModel.benchLoss() }) { Text("LOSS") }
+            TextButton(onClick = { viewModel.benchGps() }) { Text("GPS") }
+        }
 
         Column(
             modifier = Modifier

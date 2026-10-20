@@ -1,6 +1,7 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -100,6 +101,9 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
     // Stable ID: same value every time the app starts
     val nodeId: String = DeviceIdentity.getId(application)
 
+    // Benchmark helper (logs with tag "BENCH")
+    private val bench = BenchRunner(transport, viewModelScope, locationProvider, nodeId)
+
     init {
         // 1. Observe local DB and feed into core module to restore state
         viewModelScope.launch {
@@ -117,13 +121,35 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
         // 2. Listen for incoming mesh network requests
         viewModelScope.launch {
             transport.incomingRequests.collect { req ->
+                // Benchmark packets (PING/PONG/LOSS) are handled separately
+                if (bench.handleIncoming(req)) return@collect
+
+                val t0 = SystemClock.elapsedRealtimeNanos()
                 if (coreModule.processIncomingRequest(req)) {
                     requestDao.insertRequest(req.toEntity())
                     updateUiState()
 
                     // Flood-fill across the mesh
                     transport.broadcastRequest(req)
+
+                    BenchLog.log(
+                        "PROC",
+                        "id" to req.id.take(8),
+                        "ms" to ((SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000.0)
+                    )
                 }
+            }
+        }
+
+        // Benchmark: log when peers are discovered / connected
+        viewModelScope.launch {
+            transport.discoveredPeers.collect { list ->
+                BenchLog.log("DISCOVERED", "n" to list.size, "peers" to list.toString())
+            }
+        }
+        viewModelScope.launch {
+            transport.connectedPeers.collect { list ->
+                BenchLog.log("CONNECTED", "n" to list.size, "peers" to list.toString())
             }
         }
 
@@ -198,15 +224,22 @@ class MeshViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startMesh() {
         viewModelScope.launch {
+            BenchLog.log("MESH_START")
             transport.startAdvertisingAndDiscovering()
         }
     }
 
     fun connectToPeer(endpointId: String) {
         viewModelScope.launch {
+            BenchLog.log("CONNECT_REQ", "endpoint" to endpointId)
             transport.connectToPeer(endpointId)
         }
     }
+
+    // ---- Benchmark triggers (temporary, remove after collecting data) ----
+    fun benchPing() = bench.runPing()
+    fun benchLoss() = bench.runLoss()
+    fun benchGps() = bench.runGps()
 
     private fun updateUiState() {
         val all = coreModule.getAllRequests()

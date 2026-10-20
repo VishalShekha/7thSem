@@ -266,7 +266,7 @@ object RetrofitClient {
     private const val KEY_SERVER_URL = "server_base_url"
 
     // Only used the very first time, before the user configures a real address.
-    private const val DEFAULT_BASE_URL = "http://172.20.188.92:3000/"
+    private const val DEFAULT_BASE_URL = "https://seventhsembackend.onrender.com/"
 
     private val moshi = Moshi.Builder()
         .addLast(KotlinJsonAdapterFactory())
